@@ -1,0 +1,18 @@
+.venv/
+__pycache__/
+*.pyc
+
+# training artifacts (not source)
+training_checkpoints/
+samples/
+logs/
+
+# large local datasets (baked into the Docker image separately, not committed)
+preprocess/images/
+preprocess/outdata/
+
+# cluster credentials - never commit
+aws-cluster.conf
+*.pem
+*.kubeconfig
+kubeconfig

@@ -1,0 +1,6 @@
+images/*
+outdata/*
+!images/train/
+!images/test/
+!images/train/.gitkeep
+!images/test/.gitkeep

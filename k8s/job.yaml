@@ -1,0 +1,30 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: pix2pix-train
+spec:
+  backoffLimit: 2
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: pix2pix
+          image: docker.io/tthogho1/pix2pix:latest
+          imagePullPolicy: Always
+          args:
+            - "--data-dir=/workspace/data/outdata"
+            - "--steps=40000"
+            - "--buffer-size=1000"
+            - "--checkpoint-dir=/workspace/output/training_checkpoints"
+            - "--log-dir=/workspace/output/logs/"
+            - "--sample-dir=/workspace/output/samples"
+          resources:
+            limits:
+              nvidia.com/gpu: 1
+          volumeMounts:
+            - name: output
+              mountPath: /workspace/output
+      volumes:
+        - name: output
+          persistentVolumeClaim:
+            claimName: pix2pix-output

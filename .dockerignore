@@ -1,0 +1,10 @@
+.venv
+__pycache__
+*.pyc
+training_checkpoints
+samples
+logs
+k8s
+preprocess/images
+preprocess/*.go
+preprocess/go.*

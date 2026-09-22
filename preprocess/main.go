@@ -24,7 +24,7 @@ func isImageFile(name string) bool {
 }
 
 func processImage(inPath, outPath string, imgSize, outImgWidth, outImgHeight, edgeThresh int) error {
-	// 画像のリサイズ
+	// Resize the image
 	resizeMat := gocv.IMRead(inPath, gocv.IMReadAnyColor)
 	if resizeMat.Empty() {
 		return fmt.Errorf("failed to read image: %s", inPath)
@@ -33,7 +33,7 @@ func processImage(inPath, outPath string, imgSize, outImgWidth, outImgHeight, ed
 
 	gocv.Resize(resizeMat, &resizeMat, image.Point{imgSize, imgSize}, 0, 0, gocv.InterpolationDefault)
 
-	// グレースケールさせてからエッジ抽出
+	// Convert to grayscale, then extract edges
 	gray := gocv.NewMat()
 	defer gray.Close()
 	gocv.CvtColor(resizeMat, &gray, gocv.ColorBGRToGray)
@@ -42,7 +42,8 @@ func processImage(inPath, outPath string, imgSize, outImgWidth, outImgHeight, ed
 	defer edge.Close()
 	gocv.Canny(gray, &edge, float32(edgeThresh), float32(edgeThresh*3))
 
-	// 画像の結合　左：リサイズ　右：エッジ抽出
+	// Combine side by side: left = resized original, right = edges.
+	// pix2pix.py's load() relies on this layout (left = target, right = input).
 	outImg := image.NewRGBA(image.Rect(0, 0, outImgWidth, outImgHeight))
 
 	resizeImg, err := resizeMat.ToImage()
@@ -59,12 +60,12 @@ func processImage(inPath, outPath string, imgSize, outImgWidth, outImgHeight, ed
 	rectRight := image.Rect(imgSize, 0, imgSize+imgSize, imgSize)
 	draw.Draw(outImg, rectRight, edgeImg, image.Point{0, 0}, draw.Over)
 
-	// 出力先のサブフォルダを作成
+	// Create the destination subfolder
 	if err := os.MkdirAll(filepath.Dir(outPath), 0755); err != nil {
 		return err
 	}
 
-	// 画像の保存
+	// Save the image
 	outFile, err := os.Create(outPath)
 	if err != nil {
 		return err
@@ -83,7 +84,7 @@ func main() {
 	outImgWidth := 512
 	outImgHeight := 256
 
-	// エッジ抽出の閾値
+	// Canny edge detection threshold
 	edgeThresh := 40
 
 	fmt.Println("image convert start")

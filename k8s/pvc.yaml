@@ -3,6 +3,7 @@ kind: PersistentVolumeClaim
 metadata:
   name: pix2pix-output
 spec:
+  storageClassName: local-path
   accessModes:
     - ReadWriteOnce
   resources:

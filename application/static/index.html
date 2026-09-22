@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pix2pix — edges to face</title>
+<style>
+  :root {
+    --bg: #f6f6f4;
+    --panel: #ffffff;
+    --border: #dcdcd6;
+    --text: #1c1c1a;
+    --muted: #6b6b64;
+    --accent: #3a6ea5;
+    --accent-soft: #e8f0f9;
+    --danger: #a5333a;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #17171a;
+      --panel: #212125;
+      --border: #35353b;
+      --text: #ececea;
+      --muted: #9a9a94;
+      --accent: #7aa8d8;
+      --accent-soft: #23303d;
+      --danger: #e08289;
+    }
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    padding: 32px 16px 64px;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    line-height: 1.6;
+  }
+
+  .wrap { max-width: 900px; margin: 0 auto; }
+
+  header { margin-bottom: 28px; }
+
+  h1 { font-size: 1.5rem; margin: 0 0 6px; letter-spacing: -0.01em; }
+
+  .sub { color: var(--muted); font-size: 0.875rem; margin: 0; }
+
+  #dropZone {
+    border: 2px dashed var(--border);
+    border-radius: 12px;
+    background: var(--panel);
+    padding: 44px 24px;
+    text-align: center;
+    cursor: pointer;
+    transition: border-color .15s, background .15s;
+  }
+
+  #dropZone:hover { border-color: var(--accent); }
+
+  #dropZone.dragover {
+    border-color: var(--accent);
+    background: var(--accent-soft);
+  }
+
+  .drop-title { font-weight: 600; margin: 0 0 4px; }
+
+  .drop-hint { color: var(--muted); font-size: 0.85rem; margin: 0 0 16px; }
+
+  .btn {
+    font: inherit;
+    font-size: 0.9rem;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--text);
+    padding: 8px 18px;
+    border-radius: 999px;
+    cursor: pointer;
+  }
+
+  .btn:hover { border-color: var(--accent); color: var(--accent); }
+
+  #fileInput { display: none; }
+
+  #status {
+    margin-top: 20px;
+    font-size: 0.9rem;
+    color: var(--muted);
+    min-height: 1.5em;
+  }
+
+  #status.error { color: var(--danger); }
+
+  #results {
+    margin-top: 28px;
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 16px;
+  }
+
+  @media (max-width: 640px) {
+    #results { grid-template-columns: 1fr; }
+  }
+
+  figure {
+    margin: 0;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+  }
+
+  figure img {
+    display: block;
+    width: 100%;
+    aspect-ratio: 1 / 1;
+    object-fit: cover;
+    background: var(--bg);
+  }
+
+  figcaption {
+    padding: 10px 12px;
+    font-size: 0.8rem;
+    color: var(--muted);
+    border-top: 1px solid var(--border);
+  }
+
+  .step { color: var(--accent); font-weight: 600; margin-right: 6px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>pix2pix — edges to face</h1>
+    <p class="sub">Upload an image to extract its edges and regenerate it with the trained model.</p>
+  </header>
+
+  <div id="dropZone">
+    <p class="drop-title">Drag &amp; drop an image here</p>
+    <p class="drop-hint">or pick one from your files</p>
+    <button type="button" class="btn" id="pickButton">Choose file</button>
+    <input type="file" id="fileInput" accept="image/*">
+  </div>
+
+  <p id="status"></p>
+
+  <div id="results" hidden>
+    <figure>
+      <img id="originalImg" alt="Uploaded image">
+      <figcaption><span class="step">1</span>Input</figcaption>
+    </figure>
+    <figure>
+      <img id="edgesImg" alt="Extracted edge map">
+      <figcaption><span class="step">2</span>Edges</figcaption>
+    </figure>
+    <figure>
+      <img id="resultImg" alt="Generated image">
+      <figcaption><span class="step">3</span>Generated</figcaption>
+    </figure>
+  </div>
+</div>
+
+<script>
+  const dropZone = document.getElementById('dropZone');
+  const fileInput = document.getElementById('fileInput');
+  const pickButton = document.getElementById('pickButton');
+  const statusEl = document.getElementById('status');
+  const results = document.getElementById('results');
+  const originalImg = document.getElementById('originalImg');
+  const edgesImg = document.getElementById('edgesImg');
+  const resultImg = document.getElementById('resultImg');
+
+  let objectUrl = null;
+
+  function setStatus(message, isError) {
+    statusEl.textContent = message;
+    statusEl.classList.toggle('error', Boolean(isError));
+  }
+
+  async function handleFile(file) {
+    if (!file.type.startsWith('image/')) {
+      setStatus('Please choose an image file.', true);
+      return;
+    }
+
+    if (objectUrl) URL.revokeObjectURL(objectUrl);
+    objectUrl = URL.createObjectURL(file);
+    originalImg.src = objectUrl;
+    edgesImg.removeAttribute('src');
+    resultImg.removeAttribute('src');
+    results.hidden = false;
+    setStatus('Converting…');
+
+    const body = new FormData();
+    body.append('file', file);
+
+    try {
+      const response = await fetch('/api/convert', { method: 'POST', body });
+      if (!response.ok) {
+        const detail = await response.json().catch(() => ({}));
+        throw new Error(detail.detail || `Conversion failed (${response.status})`);
+      }
+      const data = await response.json();
+      edgesImg.src = data.edges;
+      resultImg.src = data.result;
+      setStatus('Done.');
+    } catch (error) {
+      setStatus(error.message, true);
+    }
+  }
+
+  pickButton.addEventListener('click', (event) => {
+    event.stopPropagation();
+    fileInput.click();
+  });
+
+  dropZone.addEventListener('click', () => fileInput.click());
+
+  fileInput.addEventListener('change', () => {
+    const file = fileInput.files[0];
+    if (file) handleFile(file);
+    fileInput.value = '';
+  });
+
+  dropZone.addEventListener('dragover', (event) => {
+    event.preventDefault();
+    dropZone.classList.add('dragover');
+  });
+
+  dropZone.addEventListener('dragleave', () => {
+    dropZone.classList.remove('dragover');
+  });
+
+  dropZone.addEventListener('drop', (event) => {
+    event.preventDefault();
+    dropZone.classList.remove('dragover');
+    const file = event.dataTransfer.files[0];
+    if (file) handleFile(file);
+  });
+
+  // Without this the browser navigates away when a file is dropped outside the zone.
+  ['dragover', 'drop'].forEach((type) => {
+    document.addEventListener(type, (event) => event.preventDefault());
+  });
+</script>
+</body>
+</html>

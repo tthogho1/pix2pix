@@ -6,10 +6,14 @@ __pycache__/
 training_checkpoints/
 samples/
 logs/
+application/output/
 
 # large local datasets (baked into the Docker image separately, not committed)
 preprocess/images/
 preprocess/outdata/
+
+# local tooling state
+.claude/
 
 # cluster credentials - never commit
 aws-cluster.conf

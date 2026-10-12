@@ -2,3 +2,7 @@ matplotlib==3.11.2
 numpy==2.5.3
 tensorflow==2.21.0
 tensorboard==2.21.0
+
+# dataset preparation (prepare_dataset.py, download_selfie2anime.py)
+Pillow
+pyarrow

@@ -4,9 +4,14 @@ __pycache__/
 
 # training artifacts (not source)
 training_checkpoints/
+cyclegan_checkpoints/
 samples/
+cyclegan_samples/
 logs/
 application/output/
+
+# downloaded datasets
+datasets/
 
 # large local datasets (baked into the Docker image separately, not committed)
 preprocess/images/

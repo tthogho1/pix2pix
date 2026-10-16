@@ -1,0 +1,34 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: cyclegan-train
+spec:
+  backoffLimit: 2
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: cyclegan
+          image: docker.io/tthogho1/cyclegan:latest
+          imagePullPolicy: Always
+          args:
+            # 40000 steps is roughly 5 hours on a Tesla T4; try 10000 first.
+            - "--steps=40000"
+            - "--data-dir=/workspace/data/selfie2anime"
+            - "--buffer-size=3400"
+            # Resume from the newest checkpoint, so a retry does not restart
+            # training from scratch. A no-op on the first run.
+            - "--restore"
+            - "--checkpoint-dir=/workspace/output/cyclegan_checkpoints"
+            - "--log-dir=/workspace/output/logs/"
+            - "--sample-dir=/workspace/output/samples"
+          resources:
+            limits:
+              nvidia.com/gpu: 1
+          volumeMounts:
+            - name: output
+              mountPath: /workspace/output
+      volumes:
+        - name: output
+          persistentVolumeClaim:
+            claimName: cyclegan-output

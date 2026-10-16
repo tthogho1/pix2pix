@@ -26,8 +26,10 @@ generator learns *edges → photo*.
 | `preprocess/` | Go tool that turns raw photos into paired training images |
 | `pix2pix.py` | Training script (U-Net generator + PatchGAN discriminator) |
 | `Dockerfile` | GPU training image, with the prepared dataset baked in |
-| `k8s/` | Kubernetes manifests: training Job, PVC, storage and GPU plugins |
+| `k8s/` | Kubernetes manifests: training Jobs, PVCs, storage and GPU plugins |
 | `application/` | FastAPI inference app with a drag & drop web UI |
+| `cyclegan.py` | CycleGAN training for unpaired translation — see [CycleGAN](#cyclegan-photo--anime) |
+| `prepare_dataset.py`, `download_selfie2anime.py` | CycleGAN dataset tooling |
 
 ## 1. Prepare the dataset
 
@@ -158,3 +160,83 @@ the generated image as base64 data URIs.
 Note that the generator runs with `training=True` at inference, keeping dropout
 active — pix2pix uses it as its noise source, so the same input yields slightly
 different outputs each time.
+
+## CycleGAN: photo → anime
+
+The pix2pix pipeline above cannot turn a real photo into an anime one, for a
+reason no amount of training fixes: Canny preprocessing discards all color, so
+the generator invents it from its training prior instead of keeping the photo's
+own. Translating between two domains that have no paired data is what CycleGAN
+is for, and `cyclegan.py` implements it.
+
+It shares pix2pix's U-Net generator and PatchGAN discriminator shapes, but uses
+instance normalization and a single-image discriminator (there is no
+conditioning pair to judge against), so the networks are defined separately.
+Four networks train at once — two generators and two discriminators — which
+costs roughly 3–4× pix2pix per step.
+
+### Get a dataset
+
+`download_selfie2anime.py` fetches **selfie2anime**, the standard benchmark for
+this task (introduced with U-GAT-IT): 3,400 train + 100 test images per domain,
+256×256 in both. It pulls the Hugging Face parquet mirror, so no login is needed.
+
+```bash
+pip install -r requirements.txt
+python download_selfie2anime.py --output datasets/selfie2anime
+```
+
+To use your own images instead, `prepare_dataset.py` builds the same layout from
+two folders. It center-crops to square before resizing, so faces are not
+stretched, and warns when the sources are smaller than the target size:
+
+```bash
+python prepare_dataset.py \
+    --domain-a <real photos> \
+    --domain-b <anime faces> \
+    --output datasets/mine
+```
+
+Either way the result is the layout `cyclegan.py` expects:
+
+```
+<data-dir>/
+├── trainA/  domain A — the input side
+├── trainB/  domain B — the output side
+├── testA/
+└── testB/
+```
+
+**The direction follows the folders.** Generator G translates A → B, and that is
+what the progress samples and `final_*.png` show. For photo → anime, real photos
+must be in `trainA`.
+
+### Train
+
+```bash
+python cyclegan.py --data-dir datasets/selfie2anime --steps 40000 --buffer-size 3400
+```
+
+On a Tesla T4, expect roughly 400–450 seconds per 1,000 steps, so 40,000 steps
+is about 5 hours. Start at 10,000 to confirm it is learning before committing to
+a long run — samples land in `--sample-dir` every 1,000 steps.
+
+Checkpoints hold all four networks and their optimizers, so each save is ~457 MB
+and `CheckpointManager` keeps the newest 3. `--restore` resumes from the newest
+one, and is a no-op when there is none.
+
+On Kubernetes, with the same cluster prerequisites as above:
+
+```bash
+docker build -f Dockerfile.cyclegan -t docker.io/<user>/cyclegan:latest .
+docker push docker.io/<user>/cyclegan:latest
+
+kubectl apply -f k8s/cyclegan-pvc.yaml
+kubectl apply -f k8s/cyclegan-job.yaml
+kubectl logs -f job/cyclegan-train
+```
+
+The Job passes `--restore`, so if a pod dies it resumes from the last checkpoint
+rather than starting over. Note that the step counter restarts at 0 on resume:
+the run does `--steps` more steps from the restored weights, and sample
+filenames begin again at `step_0000000.png`.

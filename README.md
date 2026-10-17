@@ -131,8 +131,24 @@ Only the newest checkpoint is needed: its `.index` and `.data-00000-of-00001` pa
 
 ## 3. Run the inference app
 
-The app applies the same preprocessing as the Go tool (resize → grayscale →
-Canny), then runs the generator on the resulting edge map.
+The app runs two models on the same upload and shows the results side by side:
+
+- **cyclegan** — the generator trained in this repo, from a local checkpoint
+- **animegan** — pretrained [AnimeGANv2](https://github.com/bryandlee/animegan2-pytorch)
+  (`face_paint_512_v2`), fetched through `torch.hub`
+
+Running both is the point: the pretrained model is a reference to judge our own
+training against, which sample images alone cannot provide. Note that
+`torch.hub` downloads and executes model code from that GitHub repo.
+
+Both see the same center-cropped square — the framing `prepare_dataset.py`
+applies — resized to whatever each model was trained at (256 and 512). Neither
+extracts edges, so the photo's own colors carry through.
+
+If the CycleGAN checkpoint is missing or was trained with a different
+architecture, that model is skipped with a message and the app serves the other
+one. Checkpoints from the earlier U-Net generator cannot be loaded by the
+current ResNet one.
 
 ```bash
 cd application
@@ -148,14 +164,14 @@ python infer.py --input face.jpg --output output/result.png
 | Option | Default | Meaning |
 |---|---|---|
 | `--input` | — | source photo (required unless `--serve`) |
-| `--output` | `output/result.png` | where to write the generated photo |
-| `--checkpoint-dir` | `../training_checkpoints` | directory holding the trained checkpoint |
-| `--save-edges` | — | also save the intermediate edge map |
+| `--output` | `output/result.png` | output path; the model name is appended to the stem |
+| `--model` | `both` | `both`, `cyclegan` or `animegan` |
+| `--checkpoint-dir` | `../cyclegan_checkpoints` | directory holding the trained CycleGAN checkpoint |
 | `--serve` / `--host` / `--port` | `127.0.0.1:8000` | run the web UI |
 
-The model loads once at startup and is reused across requests.
-`POST /api/convert` takes a multipart `file` field and returns the edge map and
-the generated image as base64 data URIs.
+Models load once at startup and are reused across requests.
+`POST /api/convert` takes a multipart `file` field and returns the cropped
+source plus one entry per model, all as base64 data URIs.
 
 Note that the generator runs with `training=True` at inference, keeping dropout
 active — pix2pix uses it as its noise source, so the same input yields slightly
@@ -221,7 +237,7 @@ On a Tesla T4, expect roughly 400–450 seconds per 1,000 steps, so 40,000 steps
 is about 5 hours. Start at 10,000 to confirm it is learning before committing to
 a long run — samples land in `--sample-dir` every 1,000 steps.
 
-Checkpoints hold all four networks and their optimizers, so each save is ~457 MB
+Checkpoints hold all four networks and their optimizers, so each save is ~1.4 GB
 and `CheckpointManager` keeps the newest 3. `--restore` resumes from the newest
 one, and is a no-op when there is none.
 

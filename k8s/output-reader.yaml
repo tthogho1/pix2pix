@@ -1,0 +1,36 @@
+# Mounts the training output PVC so files can be copied out with kubectl cp.
+# The training Job's own pod cannot be used for this: once it completes, there
+# is no running container left to exec into.
+#
+#   kubectl apply -f k8s/output-reader.yaml
+#   kubectl wait --for=condition=Ready pod/output-reader --timeout=120s
+#   kubectl exec output-reader -- ls /output/samples
+#   kubectl cp output-reader:/output/samples/final_0.png ./final_0.png
+#   kubectl delete -f k8s/output-reader.yaml
+#
+# Safe to run while training is in progress: ReadWriteOnce allows several pods
+# to mount the volume as long as they share a node, which they do here.
+#
+# Checkpoints are too large for kubectl cp, which truncates them. Copy those
+# straight off the node instead:
+#
+#   kubectl get pv $(kubectl get pvc cyclegan-output -o jsonpath='{.spec.volumeName}') \
+#     -o jsonpath='{.spec.hostPath.path}'
+#   scp -i <key> ubuntu@<gpu node>:<that path>/cyclegan_checkpoints/ckpt-N.* .
+apiVersion: v1
+kind: Pod
+metadata:
+  name: output-reader
+spec:
+  restartPolicy: Never
+  containers:
+    - name: reader
+      image: busybox
+      command: ["sleep", "3600"]
+      volumeMounts:
+        - name: output
+          mountPath: /output
+  volumes:
+    - name: output
+      persistentVolumeClaim:
+        claimName: cyclegan-output

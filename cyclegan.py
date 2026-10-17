@@ -4,8 +4,11 @@ Unlike pix2pix.py, this needs no paired data: it learns from two independent
 folders of images and keeps translations consistent by requiring that a round
 trip through both generators returns the original image.
 
-Based on the TensorFlow CycleGAN tutorial,
-https://www.tensorflow.org/tutorials/generative/cyclegan
+Follows the architecture and training setup of the CycleGAN paper
+(https://arxiv.org/abs/1703.10593) rather than the simplified TensorFlow
+tutorial: a ResNet generator, least-squares adversarial loss, a buffer of past
+generated images for the discriminators, and a learning rate that decays to
+zero over the second half of training.
 
 Expected dataset layout (the conventional CycleGAN one):
 
@@ -16,13 +19,14 @@ Expected dataset layout (the conventional CycleGAN one):
     `-- testB/
 
 Usage:
-    python cyclegan.py --data-dir datasets/photo2anime --steps 100000
+    python cyclegan.py --data-dir datasets/selfie2anime --steps 20000
 """
 
 import argparse
 import datetime
 import os
 import pathlib
+import random
 import time
 
 import tensorflow as tf
@@ -32,8 +36,13 @@ IMG_WIDTH = 256
 IMG_HEIGHT = 256
 OUTPUT_CHANNELS = 3
 LAMBDA = 10
+RESIDUAL_BLOCKS = 9
+BUFFER_IMAGES = 50
 
-loss_object = tf.keras.losses.BinaryCrossentropy(from_logits=True)
+# Least squares rather than cross entropy: LSGAN gives the generator usable
+# gradients even for samples the discriminator already classifies confidently,
+# which is what keeps CycleGAN from oscillating.
+loss_object = tf.keras.losses.MeanSquaredError()
 
 
 # ---------------------------------------------------------------------------
@@ -95,6 +104,32 @@ def build_dataset(directory, batch_size, buffer_size, training):
 # Building blocks
 # ---------------------------------------------------------------------------
 
+class ReflectionPadding2D(tf.keras.layers.Layer):
+    """Mirrors edge pixels instead of padding with zeros.
+
+    Zero padding leaves dark borders that the generator learns to reproduce as
+    edge artifacts, so CycleGAN reflects instead.
+    """
+
+    def __init__(self, padding=1, **kwargs):
+        super().__init__(**kwargs)
+        self.padding = padding
+
+    def call(self, inputs):
+        p = self.padding
+        return tf.pad(inputs, [[0, 0], [p, p], [p, p], [0, 0]], mode="REFLECT")
+
+    def compute_output_shape(self, input_shape):
+        batch, height, width, channels = input_shape
+        pad = 2 * self.padding
+        return (
+            batch,
+            None if height is None else height + pad,
+            None if width is None else width + pad,
+            channels,
+        )
+
+
 def instance_norm():
     # groups=-1 puts every channel in its own group, which is instance norm.
     # CycleGAN uses it rather than batch norm so each image is normalized
@@ -122,79 +157,91 @@ def downsample(filters, size, apply_norm=True):
     return result
 
 
-def upsample(filters, size, apply_dropout=False):
+def residual_block(filters):
     initializer = tf.random_normal_initializer(0.0, 0.02)
 
-    result = tf.keras.Sequential()
-    result.add(
-        tf.keras.layers.Conv2DTranspose(
+    return tf.keras.Sequential(
+        [
+            ReflectionPadding2D(1),
+            tf.keras.layers.Conv2D(
+                filters,
+                3,
+                padding="valid",
+                kernel_initializer=initializer,
+                use_bias=False,
+            ),
+            instance_norm(),
+            tf.keras.layers.ReLU(),
+            ReflectionPadding2D(1),
+            tf.keras.layers.Conv2D(
+                filters,
+                3,
+                padding="valid",
+                kernel_initializer=initializer,
+                use_bias=False,
+            ),
+            instance_norm(),
+        ]
+    )
+
+
+# ---------------------------------------------------------------------------
+# Generator (ResNet) and Discriminator (PatchGAN)
+# ---------------------------------------------------------------------------
+
+def Generator():
+    """CycleGAN's ResNet generator: c7s1-64, d128, d256, R256 x9, u128, u64, c7s1-3.
+
+    pix2pix's U-Net is a poor fit here. Its skip connections squeeze the image
+    through a 1x1 bottleneck and then restore detail straight from the encoder,
+    which works when input and output are pixel-aligned but collapses when the
+    translation has to change shape. This keeps a 64x64 feature map throughout.
+    """
+    initializer = tf.random_normal_initializer(0.0, 0.02)
+    inputs = tf.keras.layers.Input(shape=[IMG_HEIGHT, IMG_WIDTH, 3])
+
+    x = ReflectionPadding2D(3)(inputs)
+    x = tf.keras.layers.Conv2D(
+        64, 7, padding="valid", kernel_initializer=initializer, use_bias=False
+    )(x)
+    x = instance_norm()(x)
+    x = tf.keras.layers.ReLU()(x)  # (bs, 256, 256, 64)
+
+    for filters in (128, 256):
+        x = tf.keras.layers.Conv2D(
             filters,
-            size,
+            3,
             strides=2,
             padding="same",
             kernel_initializer=initializer,
             use_bias=False,
-        )
-    )
-    result.add(instance_norm())
-    if apply_dropout:
-        result.add(tf.keras.layers.Dropout(0.5))
-    result.add(tf.keras.layers.ReLU())
-    return result
+        )(x)
+        x = instance_norm()(x)
+        x = tf.keras.layers.ReLU()(x)  # (bs, 128, 128, 128) -> (bs, 64, 64, 256)
 
+    for _ in range(RESIDUAL_BLOCKS):
+        x = tf.keras.layers.Add()([x, residual_block(256)(x)])  # (bs, 64, 64, 256)
 
-# ---------------------------------------------------------------------------
-# Generator (U-Net) and Discriminator (PatchGAN)
-# ---------------------------------------------------------------------------
+    for filters in (128, 64):
+        x = tf.keras.layers.Conv2DTranspose(
+            filters,
+            3,
+            strides=2,
+            padding="same",
+            kernel_initializer=initializer,
+            use_bias=False,
+        )(x)
+        x = instance_norm()(x)
+        x = tf.keras.layers.ReLU()(x)  # (bs, 128, 128, 128) -> (bs, 256, 256, 64)
 
-def Generator():
-    inputs = tf.keras.layers.Input(shape=[256, 256, 3])
-
-    down_stack = [
-        downsample(64, 4, apply_norm=False),  # (bs, 128, 128, 64)
-        downsample(128, 4),  # (bs, 64, 64, 128)
-        downsample(256, 4),  # (bs, 32, 32, 256)
-        downsample(512, 4),  # (bs, 16, 16, 512)
-        downsample(512, 4),  # (bs, 8, 8, 512)
-        downsample(512, 4),  # (bs, 4, 4, 512)
-        downsample(512, 4),  # (bs, 2, 2, 512)
-        downsample(512, 4),  # (bs, 1, 1, 512)
-    ]
-
-    up_stack = [
-        upsample(512, 4, apply_dropout=True),  # (bs, 2, 2, 1024)
-        upsample(512, 4, apply_dropout=True),  # (bs, 4, 4, 1024)
-        upsample(512, 4, apply_dropout=True),  # (bs, 8, 8, 1024)
-        upsample(512, 4),  # (bs, 16, 16, 1024)
-        upsample(256, 4),  # (bs, 32, 32, 512)
-        upsample(128, 4),  # (bs, 64, 64, 256)
-        upsample(64, 4),  # (bs, 128, 128, 128)
-    ]
-
-    initializer = tf.random_normal_initializer(0.0, 0.02)
-    last = tf.keras.layers.Conv2DTranspose(
+    x = ReflectionPadding2D(3)(x)
+    x = tf.keras.layers.Conv2D(
         OUTPUT_CHANNELS,
-        4,
-        strides=2,
-        padding="same",
+        7,
+        padding="valid",
         kernel_initializer=initializer,
         activation="tanh",
-    )  # (bs, 256, 256, 3)
-
-    x = inputs
-
-    skips = []
-    for down in down_stack:
-        x = down(x)
-        skips.append(x)
-
-    skips = reversed(skips[:-1])
-
-    for up, skip in zip(up_stack, skips):
-        x = up(x)
-        x = tf.keras.layers.Concatenate()([x, skip])
-
-    x = last(x)
+    )(x)  # (bs, 256, 256, 3)
 
     return tf.keras.Model(inputs=inputs, outputs=x)
 
@@ -204,7 +251,7 @@ def Discriminator():
 
     # Unlike pix2pix's conditional discriminator, this judges a single image:
     # there is no paired input to condition on.
-    inp = tf.keras.layers.Input(shape=[256, 256, 3], name="input_image")
+    inp = tf.keras.layers.Input(shape=[IMG_HEIGHT, IMG_WIDTH, 3], name="input_image")
 
     down1 = downsample(64, 4, apply_norm=False)(inp)  # (bs, 128, 128, 64)
     down2 = downsample(128, 4)(down1)  # (bs, 64, 64, 128)
@@ -231,7 +278,7 @@ def Discriminator():
 
 
 # ---------------------------------------------------------------------------
-# Losses
+# Losses and schedules
 # ---------------------------------------------------------------------------
 
 def discriminator_loss(real, generated):
@@ -250,6 +297,60 @@ def cycle_loss(real_image, cycled_image):
 
 def identity_loss(real_image, same_image):
     return LAMBDA * 0.5 * tf.reduce_mean(tf.abs(real_image - same_image))
+
+
+class LinearDecay(tf.keras.optimizers.schedules.LearningRateSchedule):
+    """Hold the rate, then decay it to zero over the back half of training.
+
+    Without this the generator and discriminator keep pushing each other at
+    full strength forever, so quality oscillates instead of settling.
+    """
+
+    def __init__(self, initial_learning_rate, total_steps):
+        super().__init__()
+        self.initial_learning_rate = initial_learning_rate
+        self.total_steps = float(total_steps)
+        self.decay_start = self.total_steps / 2.0
+
+    def __call__(self, step):
+        step = tf.cast(step, tf.float32)
+        remaining = (self.total_steps - step) / (self.total_steps - self.decay_start)
+        return self.initial_learning_rate * tf.clip_by_value(remaining, 0.0, 1.0)
+
+    def get_config(self):
+        return {
+            "initial_learning_rate": self.initial_learning_rate,
+            "total_steps": self.total_steps,
+        }
+
+
+class ImageBuffer:
+    """Keeps past generated images to update the discriminators with.
+
+    Showing the discriminator only the newest fakes lets the two networks chase
+    each other in a loop; mixing in older ones damps that.
+    """
+
+    def __init__(self, size=BUFFER_IMAGES):
+        self.size = size
+        self.images = []
+
+    def query(self, images):
+        if self.size == 0:
+            return images
+
+        selected = []
+        for image in images:
+            if len(self.images) < self.size:
+                self.images.append(image)
+                selected.append(image)
+            elif random.random() > 0.5:
+                index = random.randrange(self.size)
+                selected.append(self.images[index])
+                self.images[index] = image
+            else:
+                selected.append(image)
+        return tf.stack(selected)
 
 
 # ---------------------------------------------------------------------------
@@ -276,13 +377,11 @@ def generate_images(model, test_input, save_path=None):
         plt.show()
 
 
-def make_train_step(generator_g, generator_f, discriminator_x, discriminator_y,
-                    generator_g_optimizer, generator_f_optimizer,
-                    discriminator_x_optimizer, discriminator_y_optimizer,
-                    summary_writer):
+def make_train_steps(generator_g, generator_f, discriminator_x, discriminator_y,
+                     generator_g_optimizer, generator_f_optimizer,
+                     discriminator_x_optimizer, discriminator_y_optimizer):
     @tf.function
-    def train_step(real_x, real_y, step):
-        # persistent=True because four networks are differentiated separately.
+    def generator_step(real_x, real_y):
         with tf.GradientTape(persistent=True) as tape:
             fake_y = generator_g(real_x, training=True)
             cycled_x = generator_f(fake_y, training=True)
@@ -295,13 +394,8 @@ def make_train_step(generator_g, generator_f, discriminator_x, discriminator_y,
             same_x = generator_f(real_x, training=True)
             same_y = generator_g(real_y, training=True)
 
-            disc_real_x = discriminator_x(real_x, training=True)
-            disc_real_y = discriminator_y(real_y, training=True)
-            disc_fake_x = discriminator_x(fake_x, training=True)
-            disc_fake_y = discriminator_y(fake_y, training=True)
-
-            gen_g_loss = generator_loss(disc_fake_y)
-            gen_f_loss = generator_loss(disc_fake_x)
+            gen_g_loss = generator_loss(discriminator_y(fake_y, training=True))
+            gen_f_loss = generator_loss(discriminator_x(fake_x, training=True))
 
             total_cycle_loss = cycle_loss(real_x, cycled_x) + cycle_loss(
                 real_y, cycled_y
@@ -313,9 +407,6 @@ def make_train_step(generator_g, generator_f, discriminator_x, discriminator_y,
             total_gen_f_loss = (
                 gen_f_loss + total_cycle_loss + identity_loss(real_x, same_x)
             )
-
-            disc_x_loss = discriminator_loss(disc_real_x, disc_fake_x)
-            disc_y_loss = discriminator_loss(disc_real_y, disc_fake_y)
 
         generator_g_optimizer.apply_gradients(
             zip(
@@ -329,6 +420,22 @@ def make_train_step(generator_g, generator_f, discriminator_x, discriminator_y,
                 generator_f.trainable_variables,
             )
         )
+        del tape
+
+        return fake_x, fake_y, total_gen_g_loss, total_gen_f_loss, total_cycle_loss
+
+    @tf.function
+    def discriminator_step(real_x, real_y, fake_x, fake_y):
+        with tf.GradientTape(persistent=True) as tape:
+            disc_x_loss = discriminator_loss(
+                discriminator_x(real_x, training=True),
+                discriminator_x(fake_x, training=True),
+            )
+            disc_y_loss = discriminator_loss(
+                discriminator_y(real_y, training=True),
+                discriminator_y(fake_y, training=True),
+            )
+
         discriminator_x_optimizer.apply_gradients(
             zip(
                 tape.gradient(disc_x_loss, discriminator_x.trainable_variables),
@@ -341,22 +448,18 @@ def make_train_step(generator_g, generator_f, discriminator_x, discriminator_y,
                 discriminator_y.trainable_variables,
             )
         )
-
         del tape
 
-        with summary_writer.as_default():
-            tf.summary.scalar("gen_g_loss", total_gen_g_loss, step=step // 1000)
-            tf.summary.scalar("gen_f_loss", total_gen_f_loss, step=step // 1000)
-            tf.summary.scalar("cycle_loss", total_cycle_loss, step=step // 1000)
-            tf.summary.scalar("disc_x_loss", disc_x_loss, step=step // 1000)
-            tf.summary.scalar("disc_y_loss", disc_y_loss, step=step // 1000)
+        return disc_x_loss, disc_y_loss
 
-    return train_step
+    return generator_step, discriminator_step
 
 
-def fit(train_ds, test_ds, steps, train_step, generator_g, checkpoint_manager,
-        sample_dir=None):
+def fit(train_ds, test_ds, steps, generator_step, discriminator_step, generator_g,
+        checkpoint_manager, summary_writer, sample_dir=None):
     example_input = next(iter(test_ds.take(1)))
+    buffer_x = ImageBuffer()
+    buffer_y = ImageBuffer()
     start = time.time()
 
     for step, (real_x, real_y) in train_ds.take(steps).enumerate():
@@ -373,7 +476,20 @@ def fit(train_ds, test_ds, steps, train_step, generator_g, checkpoint_manager,
             generate_images(generator_g, example_input, save_path)
             print(f"Step: {step // 1000}k")
 
-        train_step(real_x, real_y, step)
+        fake_x, fake_y, gen_g_loss, gen_f_loss, cycle = generator_step(real_x, real_y)
+        # The buffer is Python state, so it sits between the two graph steps.
+        # Only the discriminators see it, and no generator gradient flows here.
+        disc_x_loss, disc_y_loss = discriminator_step(
+            real_x, real_y, buffer_x.query(fake_x), buffer_y.query(fake_y)
+        )
+
+        if (step + 1) % 100 == 0:
+            with summary_writer.as_default():
+                tf.summary.scalar("gen_g_loss", gen_g_loss, step=step)
+                tf.summary.scalar("gen_f_loss", gen_f_loss, step=step)
+                tf.summary.scalar("cycle_loss", cycle, step=step)
+                tf.summary.scalar("disc_x_loss", disc_x_loss, step=step)
+                tf.summary.scalar("disc_y_loss", disc_y_loss, step=step)
 
         if (step + 1) % 10 == 0:
             print(".", end="", flush=True)
@@ -393,12 +509,28 @@ def parse_args():
         required=True,
         help="dataset root containing trainA/ trainB/ testA/ testB/",
     )
-    parser.add_argument("--steps", type=int, default=100000)
+    parser.add_argument("--steps", type=int, default=20000, help="steps to run now")
+    parser.add_argument(
+        "--total-steps",
+        type=int,
+        default=150000,
+        help=(
+            "the whole training budget the learning rate schedule spans; decay "
+            "to zero starts halfway through it. Independent of --steps, which "
+            "is how far this run goes."
+        ),
+    )
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--buffer-size", type=int, default=1000)
     parser.add_argument("--checkpoint-dir", default="./cyclegan_checkpoints")
     parser.add_argument("--log-dir", default="logs/")
     parser.add_argument("--sample-dir", default="cyclegan_samples")
+    parser.add_argument(
+        "--keep-checkpoints",
+        type=int,
+        default=10,
+        help="how many checkpoints to retain",
+    )
     parser.add_argument(
         "--restore", action="store_true", help="restore from the latest checkpoint"
     )
@@ -421,10 +553,18 @@ def main():
     discriminator_x = Discriminator()
     discriminator_y = Discriminator()
 
-    generator_g_optimizer = tf.keras.optimizers.Adam(2e-4, beta_1=0.5)
-    generator_f_optimizer = tf.keras.optimizers.Adam(2e-4, beta_1=0.5)
-    discriminator_x_optimizer = tf.keras.optimizers.Adam(2e-4, beta_1=0.5)
-    discriminator_y_optimizer = tf.keras.optimizers.Adam(2e-4, beta_1=0.5)
+    def optimizer():
+        # Each optimizer's own iteration count drives the schedule, and that
+        # count is checkpointed, so --restore resumes the decay where it left
+        # off even though the loop's step counter starts over.
+        return tf.keras.optimizers.Adam(
+            LinearDecay(2e-4, args.total_steps), beta_1=0.5
+        )
+
+    generator_g_optimizer = optimizer()
+    generator_f_optimizer = optimizer()
+    discriminator_x_optimizer = optimizer()
+    discriminator_y_optimizer = optimizer()
 
     checkpoint = tf.train.Checkpoint(
         generator_g=generator_g,
@@ -437,7 +577,7 @@ def main():
         discriminator_y_optimizer=discriminator_y_optimizer,
     )
     checkpoint_manager = tf.train.CheckpointManager(
-        checkpoint, args.checkpoint_dir, max_to_keep=3
+        checkpoint, args.checkpoint_dir, max_to_keep=args.keep_checkpoints
     )
 
     if args.restore:
@@ -449,7 +589,7 @@ def main():
 
     os.makedirs(args.sample_dir, exist_ok=True)
 
-    train_step = make_train_step(
+    generator_step, discriminator_step = make_train_steps(
         generator_g,
         generator_f,
         discriminator_x,
@@ -458,16 +598,17 @@ def main():
         generator_f_optimizer,
         discriminator_x_optimizer,
         discriminator_y_optimizer,
-        summary_writer,
     )
 
     fit(
         train_dataset,
         test_a,
         args.steps,
-        train_step,
+        generator_step,
+        discriminator_step,
         generator_g,
         checkpoint_manager,
+        summary_writer,
         args.sample_dir,
     )
 

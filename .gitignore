@@ -19,6 +19,7 @@ preprocess/outdata/
 
 # local tooling state
 .claude/
+.DS_Store
 
 # cluster credentials - never commit
 aws-cluster.conf

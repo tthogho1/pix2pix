@@ -15,8 +15,10 @@ RUN pip install --no-cache-dir matplotlib==3.11.2 tensorboard
 # the current pip-distributed cuDNN (9.x) alongside it fixes GPU detection.
 RUN pip install --no-cache-dir nvidia-cudnn-cu12
 
-COPY cyclegan.py .
+# Dataset first: it rarely changes, so edits to cyclegan.py below do not
+# invalidate its layer and the rebuild stays small.
 COPY datasets/selfie2anime /workspace/data/selfie2anime
+COPY cyclegan.py .
 
 ENTRYPOINT ["python", "cyclegan.py"]
 CMD ["--data-dir", "/workspace/data/selfie2anime", \

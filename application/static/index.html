@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>pix2pix — edges to face</title>
+<title>CycleGAN — photo to anime</title>
 <style>
   :root {
     --bg: #f6f6f4;
@@ -96,7 +96,7 @@
   #results {
     margin-top: 28px;
     display: grid;
-    grid-template-columns: repeat(3, 1fr);
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
     gap: 16px;
   }
 
@@ -133,8 +133,8 @@
 <body>
 <div class="wrap">
   <header>
-    <h1>pix2pix — edges to face</h1>
-    <p class="sub">Upload an image to extract its edges and regenerate it with the trained model.</p>
+    <h1>CycleGAN — photo to anime</h1>
+    <p class="sub">Upload a face photo to restyle it with the trained CycleGAN generator.</p>
   </header>
 
   <div id="dropZone">
@@ -146,20 +146,7 @@
 
   <p id="status"></p>
 
-  <div id="results" hidden>
-    <figure>
-      <img id="originalImg" alt="Uploaded image">
-      <figcaption><span class="step">1</span>Input</figcaption>
-    </figure>
-    <figure>
-      <img id="edgesImg" alt="Extracted edge map">
-      <figcaption><span class="step">2</span>Edges</figcaption>
-    </figure>
-    <figure>
-      <img id="resultImg" alt="Generated image">
-      <figcaption><span class="step">3</span>Generated</figcaption>
-    </figure>
-  </div>
+  <div id="results" hidden></div>
 </div>
 
 <script>
@@ -168,15 +155,27 @@
   const pickButton = document.getElementById('pickButton');
   const statusEl = document.getElementById('status');
   const results = document.getElementById('results');
-  const originalImg = document.getElementById('originalImg');
-  const edgesImg = document.getElementById('edgesImg');
-  const resultImg = document.getElementById('resultImg');
-
-  let objectUrl = null;
 
   function setStatus(message, isError) {
     statusEl.textContent = message;
     statusEl.classList.toggle('error', Boolean(isError));
+  }
+
+  function renderPanels(panels) {
+    results.replaceChildren(...panels.map((panel, index) => {
+      const figure = document.createElement('figure');
+      const img = document.createElement('img');
+      img.src = panel.image;
+      img.alt = panel.label;
+      const caption = document.createElement('figcaption');
+      const step = document.createElement('span');
+      step.className = 'step';
+      step.textContent = String(index + 1);
+      caption.append(step, panel.label);
+      figure.append(img, caption);
+      return figure;
+    }));
+    results.hidden = false;
   }
 
   async function handleFile(file) {
@@ -185,12 +184,7 @@
       return;
     }
 
-    if (objectUrl) URL.revokeObjectURL(objectUrl);
-    objectUrl = URL.createObjectURL(file);
-    originalImg.src = objectUrl;
-    edgesImg.removeAttribute('src');
-    resultImg.removeAttribute('src');
-    results.hidden = false;
+    results.hidden = true;
     setStatus('Converting…');
 
     const body = new FormData();
@@ -203,8 +197,9 @@
         throw new Error(detail.detail || `Conversion failed (${response.status})`);
       }
       const data = await response.json();
-      edgesImg.src = data.edges;
-      resultImg.src = data.result;
+      // Show the server's cropped source rather than the raw upload, so every
+      // panel lines up with what the models actually saw.
+      renderPanels([{ label: 'Input', image: data.source }, ...data.results]);
       setStatus('Done.');
     } catch (error) {
       setStatus(error.message, true);

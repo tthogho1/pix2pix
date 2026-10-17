@@ -5,3 +5,7 @@ Pillow
 fastapi
 uvicorn[standard]
 python-multipart
+
+# AnimeGANv2 comparison model (pretrained, loaded via torch.hub)
+torch
+torchvision

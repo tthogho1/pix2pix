@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"image"
 	"image/draw"
@@ -77,19 +78,18 @@ func processImage(inPath, outPath string, imgSize, outImgWidth, outImgHeight, ed
 }
 
 func main() {
-	inputdir := "./images/"
-	out := "./outdata/"
+	inputdir := flag.String("input", "./images/", "folder of source images, searched recursively")
+	out := flag.String("output", "./outdata/", "folder to write the paired images to")
+	edgeThresh := flag.Int("edge-threshold", 40, "Canny edge detection threshold")
+	flag.Parse()
 
 	imgSize := 256
 	outImgWidth := 512
 	outImgHeight := 256
 
-	// Canny edge detection threshold
-	edgeThresh := 40
+	fmt.Printf("converting %s -> %s\n", *inputdir, *out)
 
-	fmt.Println("image convert start")
-
-	err := filepath.Walk(inputdir, func(path string, info os.FileInfo, err error) error {
+	err := filepath.Walk(*inputdir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
@@ -100,14 +100,13 @@ func main() {
 			return nil
 		}
 
-		relPath, err := filepath.Rel(inputdir, path)
+		relPath, err := filepath.Rel(*inputdir, path)
 		if err != nil {
 			return err
 		}
-		outPath := filepath.Join(out, relPath)
+		outPath := filepath.Join(*out, relPath)
 
-		fmt.Println("processing:", relPath)
-		if procErr := processImage(path, outPath, imgSize, outImgWidth, outImgHeight, edgeThresh); procErr != nil {
+		if procErr := processImage(path, outPath, imgSize, outImgWidth, outImgHeight, *edgeThresh); procErr != nil {
 			fmt.Fprintln(os.Stderr, procErr)
 		}
 		return nil

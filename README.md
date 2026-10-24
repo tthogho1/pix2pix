@@ -60,6 +60,18 @@ cd preprocess
 go run main.go
 ```
 
+`-input` and `-output` point it somewhere else, which is how you build pairs
+from a dataset that already lives elsewhere. Targets come from the images
+themselves, so any folder of anime frames works — for example the anime half of
+selfie2anime, whose 256×256 source needs no upscaling:
+
+```bash
+go run main.go -input ../datasets/selfie2anime/trainB -output ../datasets/anime_pairs/train
+go run main.go -input ../datasets/selfie2anime/testB  -output ../datasets/anime_pairs/test
+```
+
+`-edge-threshold` (default 40) controls how much line detail Canny keeps.
+
 ### How many images?
 
 Training length is set by `--steps`, not dataset size — the dataset repeats —

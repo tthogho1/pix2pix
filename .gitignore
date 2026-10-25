@@ -3,8 +3,10 @@ __pycache__/
 *.pyc
 
 # training artifacts (not source)
-training_checkpoints/
-cyclegan_checkpoints/
+# The globs also catch checkpoint directories kept aside under a suffix when
+# a retrain supersedes one, which are just as large.
+training_checkpoints*/
+cyclegan_checkpoints*/
 samples/
 cyclegan_samples/
 logs/

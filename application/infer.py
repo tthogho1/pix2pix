@@ -1,13 +1,17 @@
-"""Face photo -> anime inference app, serving two models side by side.
+"""Face photo -> anime inference app, serving three models side by side.
 
-- cyclegan: the generator trained in this repo, from a local checkpoint.
-- animegan: pretrained AnimeGANv2 (face_paint_512_v2), loaded via torch.hub.
+- pix2pix:  trained here on paired data; takes Canny edges, so colour is
+            discarded and reinvented.
+- cyclegan: trained here on unpaired data; takes the photo directly, keeping
+            its colours.
+- animegan: pretrained AnimeGANv2 (face_paint_512_v2), via torch.hub.
 
-Running both on the same input is the point: the pretrained model gives a
-reference to judge our own training against, which sample images alone cannot.
+Running them together on one input is the point: the pretrained model is a
+reference to judge our own training against, and the two trained here differ
+in method, so the comparison shows what each approach buys.
 
-Both see the same center-cropped square, resized to whatever each was trained
-at. Neither extracts edges — the photo's own colors carry through.
+All three see the same center-cropped square, resized to whatever each was
+trained at; pix2pix then reduces it to edges.
 
 Usage:
     python infer.py --input face.jpg
@@ -64,6 +68,51 @@ def denormalize(image):
 # ---------------------------------------------------------------------------
 # Models
 # ---------------------------------------------------------------------------
+
+class Pix2PixModel:
+    """Edges to anime, the paired model.
+
+    Unlike the other two this does not read the photo directly: it was trained
+    on Canny edge maps, so the photo is reduced to edges first, the same way
+    preprocess/main.go builds its training pairs. Colour is discarded along the
+    way and invented again by the generator.
+    """
+
+    name = "pix2pix"
+    label = "pix2pix (edges, trained here)"
+    size = 256
+    edge_threshold = 40
+
+    def __init__(self, checkpoint_dir):
+        import tensorflow as tf
+
+        from pix2pix import Generator
+
+        self.tf = tf
+        latest = tf.train.latest_checkpoint(checkpoint_dir)
+        if latest is None:
+            raise FileNotFoundError(f"no checkpoint in {checkpoint_dir}")
+
+        generator = Generator()
+        checkpoint = tf.train.Checkpoint(generator=generator)
+        checkpoint.restore(latest).expect_partial().assert_existing_objects_matched()
+
+        self.generator = generator
+        print(f"restored pix2pix generator from {latest}")
+
+    def detect_edges(self, image_rgb):
+        gray = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2GRAY)
+        edges = cv2.Canny(gray, self.edge_threshold, self.edge_threshold * 3)
+        return cv2.cvtColor(edges, cv2.COLOR_GRAY2RGB)
+
+    def translate(self, image_rgb):
+        edges = self.detect_edges(image_rgb)
+        tensor = self.tf.expand_dims(normalize(edges), axis=0)
+        # training=True keeps dropout active, which pix2pix uses as its noise
+        # source at inference time too.
+        prediction = self.generator(tensor, training=True)
+        return denormalize(prediction[0].numpy())
+
 
 class CycleGanModel:
     name = "cyclegan"
@@ -130,22 +179,29 @@ class AnimeGanModel:
         return denormalize(output.squeeze(0).permute(1, 2, 0).numpy())
 
 
-def load_models(selection, checkpoint_dir):
+MODEL_NAMES = ["pix2pix", "cyclegan", "animegan"]
+
+
+def load_models(selection, pix2pix_dir, cyclegan_dir):
     """Load the requested models, skipping ones that are unavailable.
 
-    A missing CycleGAN checkpoint is expected while retraining, so serving
-    only AnimeGANv2 beats refusing to start — unless it was asked for by name.
+    A checkpoint can easily be missing or belong to an older architecture while
+    a model is being retrained, so serving the rest beats refusing to start —
+    unless that model was the one asked for by name.
     """
-    wanted = ["cyclegan", "animegan"] if selection == "both" else [selection]
+    wanted = MODEL_NAMES if selection == "all" else [selection]
+    builders = {
+        "pix2pix": lambda: Pix2PixModel(pix2pix_dir),
+        "cyclegan": lambda: CycleGanModel(cyclegan_dir),
+        "animegan": AnimeGanModel,
+    }
 
     models = []
     for name in wanted:
         try:
-            models.append(
-                CycleGanModel(checkpoint_dir) if name == "cyclegan" else AnimeGanModel()
-            )
+            models.append(builders[name]())
         except Exception as error:
-            if selection != "both":
+            if selection != "all":
                 raise
             print(f"skipping {name}: {error}")
 
@@ -228,12 +284,17 @@ def parse_args():
     )
     parser.add_argument(
         "--model",
-        default="both",
-        choices=["both", "cyclegan", "animegan"],
+        default="all",
+        choices=["all"] + MODEL_NAMES,
         help="which model(s) to run",
     )
     parser.add_argument(
-        "--checkpoint-dir",
+        "--pix2pix-checkpoint-dir",
+        default=str(REPO_ROOT / "training_checkpoints"),
+        help="directory holding the trained pix2pix checkpoint",
+    )
+    parser.add_argument(
+        "--cyclegan-checkpoint-dir",
         default=str(REPO_ROOT / "cyclegan_checkpoints"),
         help="directory holding the trained CycleGAN checkpoint",
     )
@@ -251,7 +312,9 @@ def parse_args():
 
 def main():
     args = parse_args()
-    models = load_models(args.model, args.checkpoint_dir)
+    models = load_models(
+        args.model, args.pix2pix_checkpoint_dir, args.cyclegan_checkpoint_dir
+    )
 
     if args.serve:
         import uvicorn

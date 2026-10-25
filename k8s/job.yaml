@@ -12,9 +12,12 @@ spec:
           image: docker.io/tthogho1/pix2pix:latest
           imagePullPolicy: Always
           args:
-            - "--data-dir=/workspace/data/outdata"
+            # Measured at ~110 sec per 1000 steps on a Tesla T4, so this is
+            # roughly 1.3 hours — paired training converges far faster than
+            # the unpaired CycleGAN next door.
+            - "--data-dir=/workspace/data/anime_pairs"
             - "--steps=40000"
-            - "--buffer-size=1000"
+            - "--buffer-size=3400"
             - "--checkpoint-dir=/workspace/output/training_checkpoints"
             - "--log-dir=/workspace/output/logs/"
             - "--sample-dir=/workspace/output/samples"

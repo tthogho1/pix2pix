@@ -143,24 +143,28 @@ Only the newest checkpoint is needed: its `.index` and `.data-00000-of-00001` pa
 
 ## 3. Run the inference app
 
-The app runs two models on the same upload and shows the results side by side:
+The app runs three models on the same upload and shows the results side by side:
 
-- **cyclegan** — the generator trained in this repo, from a local checkpoint
+- **pix2pix** — trained here on paired data, from a local checkpoint
+- **cyclegan** — trained here on unpaired data, from a local checkpoint
 - **animegan** — pretrained [AnimeGANv2](https://github.com/bryandlee/animegan2-pytorch)
   (`face_paint_512_v2`), fetched through `torch.hub`
 
-Running both is the point: the pretrained model is a reference to judge our own
-training against, which sample images alone cannot provide. Note that
-`torch.hub` downloads and executes model code from that GitHub repo.
+Running them together is the point: the pretrained model is a reference to judge
+our own training against, and the two trained here differ in method, so the
+comparison shows what each approach buys. Note that `torch.hub` downloads and
+executes model code from that GitHub repo.
 
-Both see the same center-cropped square — the framing `prepare_dataset.py`
-applies — resized to whatever each model was trained at (256 and 512). Neither
-extracts edges, so the photo's own colors carry through.
+All three see the same center-cropped square — the framing `prepare_dataset.py`
+applies — resized to whatever each was trained at (256, 256 and 512). **pix2pix
+then reduces it to Canny edges**, since that is what it was trained on, which
+means it discards the photo's colours and invents new ones; the other two read
+the photo directly and keep them.
 
-If the CycleGAN checkpoint is missing or was trained with a different
-architecture, that model is skipped with a message and the app serves the other
-one. Checkpoints from the earlier U-Net generator cannot be loaded by the
-current ResNet one.
+A model whose checkpoint is missing, or was trained with a different
+architecture, is skipped with a message and the app serves the rest — unless it
+was named through `--model`, in which case it fails. Checkpoints from the
+earlier CycleGAN U-Net generator cannot be loaded by the current ResNet one.
 
 ```bash
 cd application
@@ -177,8 +181,9 @@ python infer.py --input face.jpg --output output/result.png
 |---|---|---|
 | `--input` | — | source photo (required unless `--serve`) |
 | `--output` | `output/result.png` | output path; the model name is appended to the stem |
-| `--model` | `both` | `both`, `cyclegan` or `animegan` |
-| `--checkpoint-dir` | `../cyclegan_checkpoints` | directory holding the trained CycleGAN checkpoint |
+| `--model` | `all` | `all`, `pix2pix`, `cyclegan` or `animegan` |
+| `--pix2pix-checkpoint-dir` | `../training_checkpoints` | directory holding the trained pix2pix checkpoint |
+| `--cyclegan-checkpoint-dir` | `../cyclegan_checkpoints` | directory holding the trained CycleGAN checkpoint |
 | `--serve` / `--host` / `--port` | `127.0.0.1:8000` | run the web UI |
 
 Models load once at startup and are reused across requests.

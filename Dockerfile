@@ -15,11 +15,15 @@ RUN pip install --no-cache-dir matplotlib==3.11.2 tensorboard
 # the current pip-distributed cuDNN (9.x) alongside it fixes GPU detection.
 RUN pip install --no-cache-dir nvidia-cudnn-cu12
 
+# Dataset first: it rarely changes, so edits to pix2pix.py below do not
+# invalidate its layer and the rebuild stays small.
+COPY datasets/anime_pairs /workspace/data/anime_pairs
 COPY pix2pix.py .
-COPY preprocess/outdata /workspace/data/outdata
 
 ENTRYPOINT ["python", "pix2pix.py"]
-CMD ["--data-dir", "/workspace/data/outdata", "--steps", "40000", \
+CMD ["--data-dir", "/workspace/data/anime_pairs", \
+     "--steps", "40000", \
+     "--buffer-size", "3400", \
      "--checkpoint-dir", "/workspace/output/training_checkpoints", \
      "--log-dir", "/workspace/output/logs/", \
      "--sample-dir", "/workspace/output/samples"]

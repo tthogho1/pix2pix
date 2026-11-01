@@ -9,3 +9,11 @@ python-multipart
 # AnimeGANv2 comparison model (pretrained, loaded via torch.hub)
 torch
 torchvision
+
+# ControlNet + anime Stable Diffusion comparison model
+diffusers
+transformers
+accelerate
+safetensors
+# only for --diffusion-control lineart
+# controlnet_aux

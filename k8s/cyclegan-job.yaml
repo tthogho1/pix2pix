@@ -12,10 +12,11 @@ spec:
           image: docker.io/tthogho1/cyclegan:latest
           imagePullPolicy: Always
           args:
-            # Roughly 2.6 hours on a Tesla T4, about 6 epochs over 3400 images.
-            # Re-applying the Job runs this many steps again from the restored
-            # checkpoint, so extend training by applying it repeatedly.
+            # Measured at ~800 sec per 1000 steps on a Tesla T4, so each run is
+            # roughly 4.5 hours. Two of them cover --total-steps: the first at a
+            # constant learning rate, the second decaying it to zero.
             - "--steps=20000"
+            - "--total-steps=40000"
             - "--data-dir=/workspace/data/selfie2anime"
             - "--buffer-size=3400"
             # Resume from the newest checkpoint, so a retry does not restart

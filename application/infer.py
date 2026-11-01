@@ -1,10 +1,12 @@
-"""Face photo -> anime inference app, serving three models side by side.
+"""Face photo -> anime inference app, serving four models side by side.
 
-- pix2pix:  trained here on paired data; takes Canny edges, so colour is
-            discarded and reinvented.
-- cyclegan: trained here on unpaired data; takes the photo directly, keeping
-            its colours.
-- animegan: pretrained AnimeGANv2 (face_paint_512_v2), via torch.hub.
+- pix2pix:   trained here on paired data; takes Canny edges, so colour is
+             discarded and reinvented.
+- cyclegan:  trained here on unpaired data; takes the photo directly, keeping
+             its colours.
+- animegan:  pretrained AnimeGANv2 (face_paint_512_v2), via torch.hub.
+- diffusion: an anime Stable Diffusion checkpoint steered by a ControlNet —
+             the same edge conditioning as pix2pix, but on a pretrained prior.
 
 Running them together on one input is the point: the pretrained model is a
 reference to judge our own training against, and the two trained here differ
@@ -179,10 +181,135 @@ class AnimeGanModel:
         return denormalize(output.squeeze(0).permute(1, 2, 0).numpy())
 
 
-MODEL_NAMES = ["pix2pix", "cyclegan", "animegan"]
+class DiffusionModel:
+    """An anime diffusion model steered by a ControlNet.
+
+    This is the same idea as pix2pix — generate an image from an edge map —
+    and the comparison is the point of including it. pix2pix had to learn
+    every colour and texture from 3,400 anime frames; this reads the edge map
+    as a constraint on a model pretrained on billions of images, so the things
+    absent from our training set, which is most of what a real photo holds,
+    are still drawable.
+
+    `conditioning_scale` is the dial between the two ways this goes wrong. At
+    1.0 the photo's structure is held so tightly that the face stays
+    photo-shaped; near 0 the anime style takes over but the likeness goes.
+    """
+
+    name = "diffusion"
+    label = "ControlNet + anime diffusion"
+    size = 512
+
+    # SD 1.5 anime checkpoints in diffusers layout, neither gated.
+    BASE_MODELS = {
+        "counterfeit": "gsdf/Counterfeit-V2.5",
+        "anything": "stablediffusionapi/anything-v5",
+    }
+    # Canny is the default because it is the very edge map pix2pix is fed, so
+    # the two panels differ only in what sits behind the edges. Lineart traces
+    # photos more cleanly and usually looks better, but needs controlnet_aux.
+    CONTROLNETS = {
+        "canny": "lllyasviel/control_v11p_sd15_canny",
+        "lineart": "lllyasviel/control_v11p_sd15_lineart",
+    }
+
+    DEFAULT_PROMPT = (
+        "masterpiece, best quality, anime style portrait, detailed face, "
+        "clean lineart, cel shading, vibrant colors"
+    )
+    DEFAULT_NEGATIVE = (
+        "photorealistic, realistic, 3d render, lowres, bad anatomy, "
+        "worst quality, low quality, blurry, watermark, text, signature"
+    )
+
+    def __init__(
+        self,
+        base="counterfeit",
+        control="canny",
+        prompt=None,
+        negative_prompt=None,
+        steps=25,
+        guidance=7.5,
+        conditioning_scale=0.7,
+        edge_threshold=40,
+    ):
+        import torch
+        from diffusers import (
+            ControlNetModel,
+            StableDiffusionControlNetPipeline,
+            UniPCMultistepScheduler,
+        )
+
+        self.torch = torch
+        self.prompt = prompt or self.DEFAULT_PROMPT
+        self.negative_prompt = negative_prompt or self.DEFAULT_NEGATIVE
+        self.steps = steps
+        self.guidance = guidance
+        self.conditioning_scale = conditioning_scale
+        self.edge_threshold = edge_threshold
+        self.control = control
+        self.detector = None
+
+        base_id = self.BASE_MODELS.get(base, base)
+        control_id = self.CONTROLNETS[control]
+        self.label = f"{control} ControlNet + {base_id.split('/')[-1]}"
+
+        if torch.cuda.is_available():
+            device, dtype = "cuda", torch.float16
+        elif torch.backends.mps.is_available():
+            device, dtype = "mps", torch.float16
+        else:
+            device, dtype = "cpu", torch.float32
+
+        controlnet = ControlNetModel.from_pretrained(control_id, torch_dtype=dtype)
+        # These checkpoints ship no safety checker, so the pipeline has to be
+        # told not to look for one.
+        pipeline = StableDiffusionControlNetPipeline.from_pretrained(
+            base_id,
+            controlnet=controlnet,
+            torch_dtype=dtype,
+            safety_checker=None,
+            requires_safety_checker=False,
+        )
+        pipeline.scheduler = UniPCMultistepScheduler.from_config(
+            pipeline.scheduler.config
+        )
+        pipeline.set_progress_bar_config(disable=True)
+        self.pipeline = pipeline.to(device)
+
+        if control == "lineart":
+            from controlnet_aux import LineartDetector
+
+            self.detector = LineartDetector.from_pretrained("lllyasviel/Annotators")
+
+        print(f"loaded {control_id} + {base_id} on {device}")
+
+    def control_image(self, image_rgb):
+        if self.detector is not None:
+            return self.detector(Image.fromarray(image_rgb), detect_resolution=self.size,
+                                 image_resolution=self.size)
+        # The same thresholds preprocess/main.go uses, so pix2pix and this see
+        # the same lines.
+        gray = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2GRAY)
+        edges = cv2.Canny(gray, self.edge_threshold, self.edge_threshold * 3)
+        return Image.fromarray(cv2.cvtColor(edges, cv2.COLOR_GRAY2RGB))
+
+    def translate(self, image_rgb):
+        output = self.pipeline(
+            self.prompt,
+            image=self.control_image(image_rgb),
+            negative_prompt=self.negative_prompt,
+            num_inference_steps=self.steps,
+            guidance_scale=self.guidance,
+            controlnet_conditioning_scale=self.conditioning_scale,
+        ).images[0]
+        return np.array(output)
 
 
-def load_models(selection, pix2pix_dir, cyclegan_dir):
+MODEL_NAMES = ["pix2pix", "cyclegan", "animegan", "diffusion"]
+
+
+def load_models(selection, pix2pix_dir, cyclegan_dir, diffusion_options=None):
     """Load the requested models, skipping ones that are unavailable.
 
     A checkpoint can easily be missing or belong to an older architecture while
@@ -194,6 +321,7 @@ def load_models(selection, pix2pix_dir, cyclegan_dir):
         "pix2pix": lambda: Pix2PixModel(pix2pix_dir),
         "cyclegan": lambda: CycleGanModel(cyclegan_dir),
         "animegan": AnimeGanModel,
+        "diffusion": lambda: DiffusionModel(**(diffusion_options or {})),
     }
 
     models = []
@@ -299,6 +427,33 @@ def parse_args():
         help="directory holding the trained CycleGAN checkpoint",
     )
     parser.add_argument(
+        "--diffusion-base",
+        default="counterfeit",
+        help="anime SD 1.5 checkpoint: a key of DiffusionModel.BASE_MODELS, "
+        "or any Hugging Face repo id in diffusers layout",
+    )
+    parser.add_argument(
+        "--diffusion-control",
+        default="canny",
+        choices=list(DiffusionModel.CONTROLNETS),
+        help="edge detector and matching ControlNet; lineart needs controlnet_aux",
+    )
+    parser.add_argument(
+        "--diffusion-prompt",
+        default=None,
+        help=f"style prompt (default: {DiffusionModel.DEFAULT_PROMPT!r})",
+    )
+    parser.add_argument(
+        "--diffusion-steps", type=int, default=25, help="denoising steps"
+    )
+    parser.add_argument(
+        "--diffusion-conditioning-scale",
+        type=float,
+        default=0.7,
+        help="how tightly the edges hold the output: 1.0 keeps the photo's "
+        "shape, lower lets the anime style reshape it",
+    )
+    parser.add_argument(
         "--serve", action="store_true", help="run the web UI instead of converting once"
     )
     parser.add_argument("--host", default="127.0.0.1", help="web UI bind address")
@@ -313,7 +468,16 @@ def parse_args():
 def main():
     args = parse_args()
     models = load_models(
-        args.model, args.pix2pix_checkpoint_dir, args.cyclegan_checkpoint_dir
+        args.model,
+        args.pix2pix_checkpoint_dir,
+        args.cyclegan_checkpoint_dir,
+        diffusion_options={
+            "base": args.diffusion_base,
+            "control": args.diffusion_control,
+            "prompt": args.diffusion_prompt,
+            "steps": args.diffusion_steps,
+            "conditioning_scale": args.diffusion_conditioning_scale,
+        },
     )
 
     if args.serve:

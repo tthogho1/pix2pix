@@ -143,23 +143,26 @@ Only the newest checkpoint is needed: its `.index` and `.data-00000-of-00001` pa
 
 ## 3. Run the inference app
 
-The app runs three models on the same upload and shows the results side by side:
+The app runs four models on the same upload and shows the results side by side:
 
 - **pix2pix** — trained here on paired data, from a local checkpoint
 - **cyclegan** — trained here on unpaired data, from a local checkpoint
 - **animegan** — pretrained [AnimeGANv2](https://github.com/bryandlee/animegan2-pytorch)
   (`face_paint_512_v2`), fetched through `torch.hub`
+- **diffusion** — an anime Stable Diffusion 1.5 checkpoint steered by a
+  [ControlNet](https://github.com/lllyasviel/ControlNet), from Hugging Face
 
-Running them together is the point: the pretrained model is a reference to judge
-our own training against, and the two trained here differ in method, so the
-comparison shows what each approach buys. Note that `torch.hub` downloads and
-executes model code from that GitHub repo.
+Running them together is the point: the pretrained models are a reference to
+judge our own training against, and the methods differ, so the comparison shows
+what each approach buys. Note that `torch.hub` downloads and executes model
+code from the AnimeGANv2 GitHub repo.
 
-All three see the same center-cropped square — the framing `prepare_dataset.py`
+All four see the same center-cropped square — the framing `prepare_dataset.py`
 applies — resized to whatever each was trained at (256, 256 and 512). **pix2pix
 then reduces it to Canny edges**, since that is what it was trained on, which
-means it discards the photo's colours and invents new ones; the other two read
-the photo directly and keep them.
+means it discards the photo's colours and invents new ones. The diffusion model
+is given that same edge map; AnimeGANv2 and CycleGAN read the photo directly
+and keep its colours.
 
 A model whose checkpoint is missing, or was trained with a different
 architecture, is skipped with a message and the app serves the rest — unless it
@@ -181,9 +184,14 @@ python infer.py --input face.jpg --output output/result.png
 |---|---|---|
 | `--input` | — | source photo (required unless `--serve`) |
 | `--output` | `output/result.png` | output path; the model name is appended to the stem |
-| `--model` | `all` | `all`, `pix2pix`, `cyclegan` or `animegan` |
+| `--model` | `all` | `all`, `pix2pix`, `cyclegan`, `animegan` or `diffusion` |
 | `--pix2pix-checkpoint-dir` | `../training_checkpoints` | directory holding the trained pix2pix checkpoint |
 | `--cyclegan-checkpoint-dir` | `../cyclegan_checkpoints` | directory holding the trained CycleGAN checkpoint |
+| `--diffusion-base` | `counterfeit` | anime SD 1.5 checkpoint: `counterfeit`, `anything`, or any HF repo id |
+| `--diffusion-control` | `canny` | `canny` or `lineart` (lineart needs `controlnet_aux`) |
+| `--diffusion-prompt` | see `DiffusionModel.DEFAULT_PROMPT` | style prompt |
+| `--diffusion-steps` | `25` | denoising steps |
+| `--diffusion-conditioning-scale` | `0.7` | how tightly the edges hold the output |
 | `--serve` / `--host` / `--port` | `127.0.0.1:8000` | run the web UI |
 
 Models load once at startup and are reused across requests.
@@ -273,3 +281,40 @@ The Job passes `--restore`, so if a pod dies it resumes from the last checkpoint
 rather than starting over. Note that the step counter restarts at 0 on resume:
 the run does `--steps` more steps from the restored weights, and sample
 filenames begin again at `step_0000000.png`.
+
+## ControlNet: the same conditioning, a pretrained prior
+
+The pix2pix result above is dark and smeared on real photos, and more training
+does not fix it. Two things are in the way:
+
+1. **The edges it sees at inference are not the edges it trained on.** Every
+   training pair was built from an anime frame, so its idea of an edge map is
+   a few thick closed lines — a huge eye outline, a hair silhouette, blank
+   flat regions. A photo's Canny map is thin broken noise: skin texture,
+   nostril shadows, background clutter, and eyes that are small ellipses.
+2. **It cannot change shape.** The U-Net's skip connections carry the input
+   edges straight to the output, so the output's geometry is the photo's
+   geometry. But in this dataset the anime-ness *is* the geometry — eye size
+   and face proportion — not the colour. The one thing that would make the
+   result look anime is the one thing the architecture forbids.
+
+ControlNet is the same conditioning idea done with a pretrained prior: an edge
+map constrains a Stable Diffusion model that already knows how to draw. Problem
+1 disappears because the prior covers everything our 3,400 frames did not, and
+problem 2 becomes a dial — `--diffusion-conditioning-scale`, where 1.0 pins the
+photo's shape and lower values let the style reshape it.
+
+```bash
+# the edge map pix2pix gets, on a prior that can actually use it
+python infer.py --serve --diffusion-control canny
+
+# cleaner traces of a photo; needs `pip install controlnet_aux`
+python infer.py --serve --diffusion-control lineart
+
+# let the anime style reshape the face more
+python infer.py --serve --diffusion-conditioning-scale 0.5
+```
+
+No training is involved — the weights come from Hugging Face on first run
+(~2 GB for the base checkpoint plus ~1.4 GB for the ControlNet, cached in
+`~/.cache/huggingface`). It picks CUDA, then Apple Silicon MPS, then CPU.

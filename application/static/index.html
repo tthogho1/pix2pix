@@ -128,6 +128,19 @@
   }
 
   .step { color: var(--accent); font-weight: 600; margin-right: 6px; }
+
+  #diffusionOption {
+    margin: 20px 0 0;
+    padding: 10px 16px 12px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--panel);
+    font-size: 0.9rem;
+  }
+
+  #diffusionOption legend { color: var(--muted); font-size: 0.8rem; padding: 0 6px; }
+
+  #diffusionOption label { margin-right: 20px; cursor: pointer; }
 </style>
 </head>
 <body>
@@ -144,6 +157,12 @@
     <input type="file" id="fileInput" accept="image/*">
   </div>
 
+  <fieldset id="diffusionOption" hidden>
+    <legend>ControlNet + Counterfeit-V2.5 diffusion</legend>
+    <label><input type="radio" name="diffusion" value="false" checked> Skip (fast)</label>
+    <label><input type="radio" name="diffusion" value="true"> Run (slow — minutes on CPU)</label>
+  </fieldset>
+
   <p id="status"></p>
 
   <div id="results" hidden></div>
@@ -155,6 +174,12 @@
   const pickButton = document.getElementById('pickButton');
   const statusEl = document.getElementById('status');
   const results = document.getElementById('results');
+  const diffusionOption = document.getElementById('diffusionOption');
+
+  fetch('/api/models')
+    .then((response) => response.json())
+    .then((data) => { diffusionOption.hidden = !data.models.includes('diffusion'); })
+    .catch(() => {});
 
   function setStatus(message, isError) {
     statusEl.textContent = message;
@@ -184,11 +209,18 @@
       return;
     }
 
+    // Only ask for diffusion when the option is shown, i.e. the server has it.
+    const runDiffusion = !diffusionOption.hidden &&
+      document.querySelector('input[name="diffusion"]:checked').value === 'true';
+
     results.hidden = true;
-    setStatus('Converting…');
+    setStatus(runDiffusion
+      ? 'Converting… (diffusion can take several minutes on CPU)'
+      : 'Converting…');
 
     const body = new FormData();
     body.append('file', file);
+    body.append('diffusion', String(runDiffusion));
 
     try {
       const response = await fetch('/api/convert', { method: 'POST', body });

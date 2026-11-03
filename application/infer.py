@@ -362,7 +362,7 @@ def convert(models, image_bgr):
 # ---------------------------------------------------------------------------
 
 def create_app(models):
-    from fastapi import FastAPI, File, HTTPException, UploadFile
+    from fastapi import FastAPI, File, Form, HTTPException, UploadFile
     from fastapi.responses import FileResponse
     from fastapi.staticfiles import StaticFiles
 
@@ -373,8 +373,12 @@ def create_app(models):
     def index():
         return FileResponse(STATIC_DIR / "index.html")
 
+    @app.get("/api/models")
+    def api_models():
+        return {"models": [model.name for model in models]}
+
     @app.post("/api/convert")
-    async def api_convert(file: UploadFile = File(...)):
+    async def api_convert(file: UploadFile = File(...), diffusion: bool = Form(True)):
         data = await file.read()
         image = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
         if image is None:
@@ -382,7 +386,15 @@ def create_app(models):
                 status_code=400, detail="could not decode the upload as an image"
             )
 
-        results = convert(models, image)
+        # Diffusion takes minutes per image on CPU against seconds for the
+        # GANs, so each request chooses whether to wait for it.
+        selected = [m for m in models if diffusion or m.name != "diffusion"]
+        if not selected:
+            raise HTTPException(
+                status_code=400, detail="diffusion is the only model loaded"
+            )
+
+        results = convert(selected, image)
         return {
             "source": to_data_uri(to_rgb_input(square_crop(image), DISPLAY_SIZE)),
             "results": [

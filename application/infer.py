@@ -316,7 +316,7 @@ def load_models(selection, pix2pix_dir, cyclegan_dir, diffusion_options=None):
     a model is being retrained, so serving the rest beats refusing to start —
     unless that model was the one asked for by name.
     """
-    wanted = MODEL_NAMES if selection == "all" else [selection]
+    wanted = MODEL_NAMES if selection == "all" else selection.split(",")
     builders = {
         "pix2pix": lambda: Pix2PixModel(pix2pix_dir),
         "cyclegan": lambda: CycleGanModel(cyclegan_dir),
@@ -362,7 +362,7 @@ def convert(models, image_bgr):
 # ---------------------------------------------------------------------------
 
 def create_app(models):
-    from fastapi import FastAPI, File, HTTPException, UploadFile
+    from fastapi import FastAPI, File, Form, HTTPException, UploadFile
     from fastapi.responses import FileResponse
     from fastapi.staticfiles import StaticFiles
 
@@ -373,8 +373,12 @@ def create_app(models):
     def index():
         return FileResponse(STATIC_DIR / "index.html")
 
+    @app.get("/api/models")
+    def api_models():
+        return {"models": [model.name for model in models]}
+
     @app.post("/api/convert")
-    async def api_convert(file: UploadFile = File(...)):
+    async def api_convert(file: UploadFile = File(...), diffusion: bool = Form(True)):
         data = await file.read()
         image = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
         if image is None:
@@ -382,7 +386,15 @@ def create_app(models):
                 status_code=400, detail="could not decode the upload as an image"
             )
 
-        results = convert(models, image)
+        # Diffusion takes minutes per image on CPU against seconds for the
+        # GANs, so each request chooses whether to wait for it.
+        selected = [m for m in models if diffusion or m.name != "diffusion"]
+        if not selected:
+            raise HTTPException(
+                status_code=400, detail="diffusion is the only model loaded"
+            )
+
+        results = convert(selected, image)
         return {
             "source": to_data_uri(to_rgb_input(square_crop(image), DISPLAY_SIZE)),
             "results": [
@@ -413,8 +425,7 @@ def parse_args():
     parser.add_argument(
         "--model",
         default="all",
-        choices=["all"] + MODEL_NAMES,
-        help="which model(s) to run",
+        help="'all', or a comma-separated list of: " + ", ".join(MODEL_NAMES),
     )
     parser.add_argument(
         "--pix2pix-checkpoint-dir",
@@ -460,6 +471,13 @@ def parse_args():
     parser.add_argument("--port", type=int, default=8000, help="web UI port")
 
     args = parser.parse_args()
+    if args.model != "all":
+        unknown = [name for name in args.model.split(",") if name not in MODEL_NAMES]
+        if unknown:
+            parser.error(
+                f"unknown model(s) {', '.join(unknown)}; choose from "
+                f"all, {', '.join(MODEL_NAMES)}"
+            )
     if not args.serve and not args.input:
         parser.error("--input is required unless --serve is given")
     return args

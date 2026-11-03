@@ -184,7 +184,7 @@ python infer.py --input face.jpg --output output/result.png
 |---|---|---|
 | `--input` | — | source photo (required unless `--serve`) |
 | `--output` | `output/result.png` | output path; the model name is appended to the stem |
-| `--model` | `all` | `all`, `pix2pix`, `cyclegan`, `animegan` or `diffusion` |
+| `--model` | `all` | `all`, or a comma-separated list of `pix2pix`, `cyclegan`, `animegan`, `diffusion` |
 | `--pix2pix-checkpoint-dir` | `../training_checkpoints` | directory holding the trained pix2pix checkpoint |
 | `--cyclegan-checkpoint-dir` | `../cyclegan_checkpoints` | directory holding the trained CycleGAN checkpoint |
 | `--diffusion-base` | `counterfeit` | anime SD 1.5 checkpoint: `counterfeit`, `anything`, or any HF repo id |
@@ -198,9 +198,44 @@ Models load once at startup and are reused across requests.
 `POST /api/convert` takes a multipart `file` field and returns the cropped
 source plus one entry per model, all as base64 data URIs.
 
+Diffusion is far slower than the GANs on CPU, so each request chooses whether
+to run it. When diffusion is loaded, the web UI shows **Skip (fast)** /
+**Run (slow)** radio buttons, set to Skip by default. In the API this is an
+optional `diffusion` form field (`true` or `false`); it defaults to `true`, so
+a request that omits it runs every loaded model. `GET /api/models` lists the
+loaded models, which is how the page knows whether to show the choice. Skipping
+saves only the time per image: diffusion still loads at startup and holds its
+memory.
+
 Note that the generator runs with `training=True` at inference, keeping dropout
 active — pix2pix uses it as its noise source, so the same input yields slightly
 different outputs each time.
+
+### Deploy to Google Cloud Run
+
+The app is deployed publicly on Cloud Run, serving all four models on CPU.
+Diffusion runs in float32 at 12 steps (`--diffusion-steps` in the Dockerfile's
+`CMD`, down from 25), but each upload still takes about 5 minutes on 4 vCPUs (measured), against about 10 s for the three GANs alone, which is
+what the UI's default of skipping diffusion gives. The container is `space/Dockerfile`, which was written for a Hugging
+Face Space. Docker Spaces on the free CPU tier now need HF PRO, so it runs on
+Cloud Run instead; `space/deploy.py` still pushes the Space if that changes.
+
+```bash
+# 1. Export generator-only weights (~208 MB + 43 MB instead of ~1 GB) and
+#    upload them to the public model repo tthogho1/face2anime-weights
+python space/export_weights.py
+
+# 2. Build with Cloud Build and deploy (needs `gcloud auth login` and a
+#    project with billing)
+space/deploy_cloudrun.sh <project-id> [region, default asia-northeast1]
+```
+
+The image downloads all model weights at build time: ours, AnimeGANv2, and
+about 5.7 GB of diffusion safetensors. `HF_HUB_OFFLINE=1` then stops anything
+being fetched at runtime. New weights or changes to `infer.py`, `pix2pix.py`,
+`cyclegan.py` or the UI therefore need a redeploy. The service runs with
+12 GiB / 4 CPU and scales to zero, so the first request after idle waits for
+all four models to load.
 
 ## CycleGAN: photo → anime
 

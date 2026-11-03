@@ -1,0 +1,16 @@
+# torch and torchvision are installed by the Dockerfile from the CPU-only index.
+tensorflow-cpu==2.21.0
+# imported at the top of pix2pix.py and cyclegan.py, which infer.py imports
+matplotlib
+numpy
+opencv-python-headless
+Pillow
+fastapi
+uvicorn[standard]
+python-multipart
+huggingface_hub
+# ControlNet + anime Stable Diffusion
+diffusers
+transformers
+accelerate
+safetensors

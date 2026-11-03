@@ -28,3 +28,6 @@ aws-cluster.conf
 *.pem
 *.kubeconfig
 kubeconfig
+
+# generator-only weights exported for the Hugging Face Space
+space_weights/

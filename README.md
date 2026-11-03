@@ -198,6 +198,15 @@ Models load once at startup and are reused across requests.
 `POST /api/convert` takes a multipart `file` field and returns the cropped
 source plus one entry per model, all as base64 data URIs.
 
+Diffusion is far slower than the GANs on CPU, so each request chooses whether
+to run it. When diffusion is loaded, the web UI shows **Skip (fast)** /
+**Run (slow)** radio buttons, set to Skip by default. In the API this is an
+optional `diffusion` form field (`true` or `false`); it defaults to `true`, so
+a request that omits it runs every loaded model. `GET /api/models` lists the
+loaded models, which is how the page knows whether to show the choice. Skipping
+saves only the time per image: diffusion still loads at startup and holds its
+memory.
+
 Note that the generator runs with `training=True` at inference, keeping dropout
 active — pix2pix uses it as its noise source, so the same input yields slightly
 different outputs each time.
@@ -206,7 +215,8 @@ different outputs each time.
 
 The app is deployed publicly on Cloud Run, serving all four models on CPU.
 Diffusion runs in float32 at 12 steps (`--diffusion-steps` in the Dockerfile's
-`CMD`, down from 25), but each upload still takes about 5 minutes on 4 vCPUs (measured), against about 10 s for the three GANs alone. The container is `space/Dockerfile`, which was written for a Hugging
+`CMD`, down from 25), but each upload still takes about 5 minutes on 4 vCPUs (measured), against about 10 s for the three GANs alone, which is
+what the UI's default of skipping diffusion gives. The container is `space/Dockerfile`, which was written for a Hugging
 Face Space. Docker Spaces on the free CPU tier now need HF PRO, so it runs on
 Cloud Run instead; `space/deploy.py` still pushes the Space if that changes.
 

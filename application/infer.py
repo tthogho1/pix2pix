@@ -316,7 +316,7 @@ def load_models(selection, pix2pix_dir, cyclegan_dir, diffusion_options=None):
     a model is being retrained, so serving the rest beats refusing to start —
     unless that model was the one asked for by name.
     """
-    wanted = MODEL_NAMES if selection == "all" else [selection]
+    wanted = MODEL_NAMES if selection == "all" else selection.split(",")
     builders = {
         "pix2pix": lambda: Pix2PixModel(pix2pix_dir),
         "cyclegan": lambda: CycleGanModel(cyclegan_dir),
@@ -413,8 +413,7 @@ def parse_args():
     parser.add_argument(
         "--model",
         default="all",
-        choices=["all"] + MODEL_NAMES,
-        help="which model(s) to run",
+        help="'all', or a comma-separated list of: " + ", ".join(MODEL_NAMES),
     )
     parser.add_argument(
         "--pix2pix-checkpoint-dir",
@@ -460,6 +459,13 @@ def parse_args():
     parser.add_argument("--port", type=int, default=8000, help="web UI port")
 
     args = parser.parse_args()
+    if args.model != "all":
+        unknown = [name for name in args.model.split(",") if name not in MODEL_NAMES]
+        if unknown:
+            parser.error(
+                f"unknown model(s) {', '.join(unknown)}; choose from "
+                f"all, {', '.join(MODEL_NAMES)}"
+            )
     if not args.serve and not args.input:
         parser.error("--input is required unless --serve is given")
     return args
